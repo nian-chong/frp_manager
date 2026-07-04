@@ -1,8 +1,93 @@
-from flask import Flask, request, redirect, jsonify
-import subprocess, re, json
+from flask import Flask, request, redirect, jsonify, session, render_template
+import subprocess, re, json, os, secrets
 
 app = Flask(__name__)
+app.secret_key = secrets.token_hex(16)
 CFG = "/usr/local/frp/frpc.toml"
+
+AUTH_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auth.json")
+
+def get_auth_credentials():
+    if not os.path.exists(AUTH_FILE):
+        default_username = "admin"
+        default_password = secrets.token_hex(4)  # 8位随机强密码
+        creds = {"username": default_username, "password": default_password, "auth_enabled": True}
+        with open(AUTH_FILE, "w") as f:
+            json.dump(creds, f)
+        print(f"==================================================")
+        print(f"🔑 FRP Manager Initialized Credentials:")
+        print(f"👤 Username: {default_username}")
+        print(f"🔒 Password: {default_password}")
+        print(f"📝 Credentials saved to: {AUTH_FILE}")
+        print(f"==================================================")
+        return creds
+    try:
+        with open(AUTH_FILE) as f:
+            data = json.load(f)
+            if "auth_enabled" not in data:
+                data["auth_enabled"] = True
+            return data
+    except:
+        return {"username": "admin", "password": "admin_password", "auth_enabled": True}
+
+# 确保启动时自动初始化或读取凭证并在后台打印
+get_auth_credentials()
+
+
+
+@app.before_request
+def check_auth():
+    if request.endpoint in ['login', 'static'] or request.path.startswith('/static'):
+        return
+    creds = get_auth_credentials()
+    if not creds.get("auth_enabled", True):
+        return
+    if not session.get('logged_in'):
+        if request.path.startswith('/api/'):
+            return jsonify({"success": False, "error": "Unauthorized"}), 401
+        return redirect('/login')
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = request.form.get("u")
+        password = request.form.get("p")
+        creds = get_auth_credentials()
+        if username == creds["username"] and password == creds["password"]:
+            session["logged_in"] = True
+            return redirect("/")
+        else:
+            return render_template("login.html", error_msg="❌ 账号或密码错误")
+    
+    if session.get("logged_in"):
+        return redirect("/")
+    return render_template("login.html")
+
+@app.route("/logout")
+def logout():
+    session.pop("logged_in", None)
+    return redirect("/login")
+
+@app.route("/api/auth/update", methods=["POST"])
+def api_update_auth():
+    try:
+        data = request.json
+        new_user = data.get("username", "").strip()
+        new_pass = data.get("password", "").strip()
+        auth_enabled = data.get("auth_enabled", True)
+        
+        if auth_enabled and (not new_user or not new_pass):
+            return jsonify({"success": False, "error": "启用密码认证时，用户名或密码不能为空"}), 400
+        
+        creds = get_auth_credentials()
+        updated_user = new_user if new_user else creds["username"]
+        updated_pass = new_pass if new_pass else creds["password"]
+        
+        with open(AUTH_FILE, "w") as f:
+            json.dump({"username": updated_user, "password": updated_pass, "auth_enabled": auth_enabled}, f)
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route("/")
 def index():
@@ -35,550 +120,15 @@ def index():
         proxy_rows = '<div class="empty-state"><div class="empty-icon">📭</div><div class="empty-text">暂无转发配置</div></div>'
     
     proxies_json = json.dumps(proxies)
+    auth_creds = get_auth_credentials()
+    auth_config_json = json.dumps({"auth_enabled": auth_creds.get("auth_enabled", True)})
     
-    html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>FRP Manager</title>
-<style>
-:root {{
-    --apple-blue: #007AFF;
-    --apple-green: #34C759;
-    --apple-red: #FF3B30;
-    --apple-orange: #FF9500;
-    --apple-gray: #8E8E93;
-    --apple-light-gray: #F2F2F7;
-    --apple-card: #FFFFFF;
-    --apple-separator: rgba(60,60,67,0.12);
-    --apple-bg: #F2F2F7;
-    --apple-text: #1C1C1E;
-    --apple-text-secondary: #8E8E93;
-}}
-* {{ margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }}
-body {{
-    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",Arial,sans-serif;
-    background:var(--apple-bg);
-    color:var(--apple-text);
-    line-height:1.47;
-    letter-spacing:-0.022em;
-    padding:0;
-}}
-.container {{ max-width:680px; margin:0 auto; padding-bottom:40px; }}
+    return render_template("index.html", 
+                           sc=sc, icon=icon, st=st, btn=btn, 
+                           proxy_rows=proxy_rows, cfg=cfg, logs=logs, 
+                           proxies_json=proxies_json, 
+                           auth_config_json=auth_config_json)
 
-/* Header */
-.header {{
-    background:rgba(255,255,255,0.8);
-    backdrop-filter:saturate(180%) blur(20px);
-    -webkit-backdrop-filter:saturate(180%) blur(20px);
-    padding:16px 20px;
-    position:sticky;
-    top:0;
-    z-index:100;
-    border-bottom:1px solid var(--apple-separator);
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-}}
-.header h1 {{ font-size:28px; font-weight:700; letter-spacing:0.004em; }}
-.refresh-btn {{
-    background:var(--apple-light-gray);
-    border:none;
-    width:36px;
-    height:36px;
-    border-radius:10px;
-    font-size:18px;
-    cursor:pointer;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    transition:all 0.2s ease;
-}}
-.refresh-btn:hover {{ background:#E5E5EA; }}
-.refresh-btn:active {{ transform:scale(0.92); }}
-.refresh-btn.spinning {{ animation:spin 1s linear infinite; }}
-@keyframes spin {{ 100% {{ transform:rotate(360deg); }} }}
-
-/* Cards */
-.card {{
-    background:var(--apple-card);
-    margin:20px 16px;
-    border-radius:14px;
-    overflow:hidden;
-    box-shadow:0 1px 3px rgba(0,0,0,0.04);
-}}
-.card-header {{
-    padding:16px 16px 12px;
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-}}
-.card-title {{ font-size:13px; font-weight:600; color:var(--apple-text-secondary); text-transform:uppercase; letter-spacing:0.06em; }}
-
-/* Status */
-.status-section {{ padding:16px; display:flex; align-items:center; justify-content:space-between; }}
-.status-badge {{
-    display:flex;
-    align-items:center;
-    gap:8px;
-    padding:8px 14px;
-    border-radius:20px;
-    font-size:15px;
-    font-weight:500;
-}}
-.status-badge.running {{ background:rgba(52,199,89,0.12); color:var(--apple-green); }}
-.status-badge.stopped {{ background:rgba(142,142,147,0.12); color:var(--apple-gray); }}
-.btn-group {{ display:flex; gap:10px; }}
-
-/* Buttons */
-.btn {{
-    padding:10px 18px;
-    border-radius:10px;
-    border:none;
-    font-size:15px;
-    font-weight:500;
-    cursor:pointer;
-    transition:all 0.2s ease;
-}}
-.btn:active {{ transform:scale(0.96); opacity:0.8; }}
-.btn-primary {{ background:var(--apple-blue); color:#fff; }}
-.btn-secondary {{ background:var(--apple-light-gray); color:var(--apple-text); }}
-.btn-danger {{ background:var(--apple-red); color:#fff; }}
-.btn-sm {{ padding:8px 14px; font-size:14px; border-radius:8px; }}
-
-/* Proxy List */
-.proxy-list {{ padding:0; }}
-.proxy-item {{
-    display:flex;
-    align-items:center;
-    gap:12px;
-    padding:14px 16px;
-    background:var(--apple-card);
-    border-bottom:1px solid var(--apple-separator);
-    transition:background 0.15s ease;
-}}
-.proxy-item:last-child {{ border-bottom:none; }}
-.proxy-item:active {{ background:var(--apple-light-gray); }}
-.proxy-icon {{ font-size:22px; }}
-.proxy-info {{ flex:1; min-width:0; }}
-.proxy-name {{ font-size:16px; font-weight:500; display:block; }}
-.proxy-detail {{ font-size:13px; color:var(--apple-text-secondary); display:flex; align-items:center; gap:6px; }}
-.arrow {{ color:var(--apple-gray); }}
-.proxy-type {{
-    font-size:11px;
-    font-weight:600;
-    color:var(--apple-text-secondary);
-    background:var(--apple-light-gray);
-    padding:4px 10px;
-    border-radius:6px;
-    text-transform:uppercase;
-}}
-.proxy-actions {{ display:flex; gap:6px; }}
-.btn-icon {{
-    width:34px;
-    height:34px;
-    border-radius:8px;
-    border:none;
-    background:var(--apple-light-gray);
-    font-size:16px;
-    cursor:pointer;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    transition:all 0.15s ease;
-}}
-.btn-icon:active {{ transform:scale(0.92); }}
-.btn-delete:active {{ background:rgba(255,59,48,0.15); }}
-
-/* Empty State */
-.empty-state {{ padding:48px 20px; text-align:center; }}
-.empty-icon {{ font-size:48px; margin-bottom:12px; }}
-.empty-text {{ color:var(--apple-text-secondary); font-size:15px; }}
-
-/* Form */
-.form-section {{ padding:16px; }}
-.form-grid {{ display:grid; gap:16px; }}
-.form-group {{ display:flex; flex-direction:column; gap:6px; }}
-.form-group label {{ font-size:13px; color:var(--apple-text-secondary); font-weight:500; }}
-.form-group input,.form-group select {{
-    width:100%;
-    padding:12px 14px;
-    border:1px solid var(--apple-separator);
-    border-radius:10px;
-    font-size:16px;
-    background:var(--apple-card);
-    transition:all 0.2s ease;
-    -webkit-appearance:none;
-}}
-.form-group input:focus,.form-group select:focus {{
-    outline:none;
-    border-color:var(--apple-blue);
-    box-shadow:0 0 0 4px rgba(0,122,255,0.15);
-}}
-
-/* Logs */
-.logs {{
-    background:#F2F2F7;
-    padding:14px;
-    max-height:280px;
-    overflow-y:auto;
-    border-radius:10px;
-    margin:16px;
-}}
-.logs pre {{
-    font-family:"SF Mono",Monaco,Consolas,monospace;
-    font-size:12px;
-    color:#1C1C1E;
-    line-height:1.5;
-    white-space:pre-wrap;
-}}
-
-/* Modal */
-.modal {{
-    display:none;
-    position:fixed;
-    inset:0;
-    background:rgba(0,0,0,0.4);
-    backdrop-filter:saturate(180%) blur(10px);
-    -webkit-backdrop-filter:saturate(180%) blur(10px);
-    z-index:1000;
-    justify-content:center;
-    align-items:center;
-    padding:20px;
-}}
-.modal.active {{ display:flex; }}
-.modal-content {{
-    background:var(--apple-card);
-    border-radius:14px;
-    width:100%;
-    max-width:420px;
-    max-height:85vh;
-    overflow-y:auto;
-    box-shadow:0 20px 40px rgba(0,0,0,0.2);
-}}
-.modal-header {{
-    padding:18px 20px;
-    border-bottom:1px solid var(--apple-separator);
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-}}
-.modal-header h3 {{ font-size:17px; font-weight:600; }}
-.close-btn {{ background:none; border:none; font-size:24px; cursor:pointer; color:var(--apple-text-secondary); padding:0; width:28px; height:28px; display:flex; align-items:center; justify-content:center; }}
-.modal-body {{ padding:20px; }}
-
-/* Toast */
-.toast {{
-    position:fixed;
-    bottom:40px;
-    left:50%;
-    transform:translateX(-50%) translateY(100px);
-    background:rgba(28,28,30,0.92);
-    backdrop-filter:saturate(180%) blur(20px);
-    color:#fff;
-    padding:14px 24px;
-    border-radius:30px;
-    font-size:15px;
-    font-weight:500;
-    z-index:1001;
-    display:none;
-    transition:all 0.3s cubic-bezier(0.175,0.885,0.32,1.275);
-}}
-.toast.show {{ transform:translateX(-50%) translateY(0); }}
-.toast.success {{ background:rgba(52,199,89,0.95); }}
-.toast.error {{ background:rgba(255,59,48,0.95); }}
-
-/* Add Button */
-.add-btn {{
-    background:var(--apple-blue);
-    color:#fff;
-    border:none;
-    padding:8px 14px;
-    border-radius:8px;
-    font-size:14px;
-    font-weight:500;
-    cursor:pointer;
-    display:flex;
-    align-items:center;
-    gap:4px;
-}}
-.add-btn:active {{ transform:scale(0.96); }}
-
-/* Loading */
-.loading {{ opacity:0.5; pointer-events:none; transition:opacity 0.3s; }}
-</style></head>
-<body>
-<div class="header">
-<h1>FRP Manager</h1>
-<button class="refresh-btn" id="refreshBtn" onclick="refreshAll()" title="刷新">🔄</button>
-</div>
-<div class="container">
-
-<div class="card" id="statusCard">
-<div class="card-header"><span class="card-title">服务状态</span></div>
-<div class="status-section">
-<div class="status-badge {sc}" id="statusBadge"><span>{icon}</span><span id="statusText">{st}</span></div>
-<div class="btn-group" id="btnGroup">
-<form method="post" action="/ctrl" style="display:inline">{btn}</form>
-</div>
-</div>
-</div>
-
-<div class="card" id="proxyCard">
-<div class="card-header">
-<span class="card-title">转发配置</span>
-<button class="add-btn" onclick="addProxy()">➕ 添加</button>
-</div>
-<div class="proxy-list" id="proxyList">{proxy_rows}</div>
-</div>
-
-<div class="card">
-<div class="card-header"><span class="card-title">主配置</span></div>
-<div class="form-section">
-<form method="post" action="/save">
-<div class="form-grid">
-<div class="form-group"><label>服务器地址</label><input name="sa" value="{cfg['sa']}"></div>
-<div class="form-group"><label>服务器端口</label><input name="sp" type="number" value="{cfg['sp']}"></div>
-<div class="form-group"><label>Token</label><input name="tk" value="{cfg['tk']}"></div>
-<div class="form-group"><label>本地 IP</label><input name="li" value="{cfg['li']}"></div>
-<div class="form-group"><label>本地端口</label><input name="lp" type="number" value="{cfg['lp']}"></div>
-<div class="form-group"><label>远程端口</label><input name="rp" type="number" value="{cfg['rp']}"></div>
-</div>
-<div style="margin-top:18px"><button type="submit" class="btn btn-primary btn-sm" style="width:100%">保存配置</button></div>
-</form>
-</div>
-</div>
-
-<div class="card" id="logsCard">
-<div class="card-header"><span class="card-title">运行日志</span></div>
-<div class="logs"><pre id="logsContent">{logs}</pre></div>
-</div>
-
-</div>
-
-<!-- Modal -->
-<div class="modal" id="proxyModal">
-<div class="modal-content">
-<div class="modal-header">
-<h3 id="modalTitle">编辑代理</h3>
-<button class="close-btn" onclick="closeModal()">×</button>
-</div>
-<div class="modal-body">
-<form id="proxyForm" onsubmit="saveProxy(event)">
-<input type="hidden" id="proxyIndex" value="-1">
-<div class="form-grid">
-<div class="form-group"><label>名称</label><input type="text" id="pName" required placeholder="如：web-http"></div>
-<div class="form-group"><label>类型</label><select id="pType" onchange="toggleAuthFields()"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="http">HTTP</option><option value="https">HTTPS</option></select></div>
-<div class="form-group"><label>本地 IP</label><input type="text" id="pLocalIP" value="127.0.0.1" required></div>
-<div class="form-group"><label>本地端口</label><input type="number" id="pLocalPort" required placeholder="如：80"></div>
-<div class="form-group"><label>远程端口</label><input type="number" id="pRemotePort" required placeholder="如：8080"></div>
-<div id="authFields" style="display:none;border-top:1px solid var(--apple-separator);padding-top:16px;margin-top:8px">
-<div style="grid-column:1/-1;display:flex;align-items:center;gap:8px;margin-bottom:12px">
-<span style="font-size:13px;font-weight:600;color:var(--apple-text-secondary)">🔐 HTTP/HTTPS 配置</span>
-</div>
-<div class="form-group"><label>绑定域名</label><input type="text" id="pCustomDomain" placeholder="如：web.example.com（留空自动生成）"></div>
-<div class="form-group"><label>用户名</label><input type="text" id="pHttpUser" placeholder="留空则禁用认证"></div>
-<div class="form-group"><label>密码</label><input type="text" id="pHttpPassword" placeholder="留空则禁用认证"></div>
-</div>
-</div>
-<div style="margin-top:20px;display:flex;gap:10px">
-<button type="submit" class="btn btn-primary" style="flex:1">保存</button>
-<button type="button" class="btn btn-secondary" style="flex:1" onclick="closeModal()">取消</button>
-</div>
-</form>
-</div>
-</div>
-</div>
-
-<div class="toast" id="toast"></div>
-
-<script>
-const proxies = {proxies_json};
-let refreshInterval = null;
-
-// 页面加载完成后开始自动刷新
-document.addEventListener('DOMContentLoaded', function() {{
-    // 每 5 秒自动刷新状态和日志
-    startAutoRefresh();
-}});
-
-function startAutoRefresh() {{
-    refreshInterval = setInterval(() => {{
-        refreshStatus();
-        refreshLogs();
-    }}, 5000);
-}}
-
-function stopAutoRefresh() {{
-    if(refreshInterval) {{
-        clearInterval(refreshInterval);
-        refreshInterval = null;
-    }}
-}}
-
-function refreshAll() {{
-    const btn = document.getElementById('refreshBtn');
-    btn.classList.add('spinning');
-    
-    refreshStatus();
-    refreshLogs();
-    refreshProxies();
-    
-    setTimeout(() => {{
-        btn.classList.remove('spinning');
-        showToast('已刷新');
-    }}, 1000);
-}}
-
-function refreshStatus() {{
-    fetch('/api/status')
-        .then(r => r.json())
-        .then(d => {{
-            const badge = document.getElementById('statusBadge');
-            const text = document.getElementById('statusText');
-            const btnGroup = document.getElementById('btnGroup');
-            
-            if(d.running) {{
-                badge.className = 'status-badge running';
-                badge.innerHTML = '<span>🟢</span><span>运行中</span>';
-                btnGroup.innerHTML = '<form method="post" action="/ctrl" style="display:inline"><button type="submit" name="a" value="stop" class="btn btn-danger">停止</button><button type="submit" name="a" value="restart" class="btn btn-secondary">重启</button></form>';
-            }} else {{
-                badge.className = 'status-badge stopped';
-                badge.innerHTML = '<span>⚪️</span><span>已停止</span>';
-                btnGroup.innerHTML = '<form method="post" action="/ctrl" style="display:inline"><button type="submit" name="a" value="start" class="btn btn-primary">启动</button></form>';
-            }}
-        }})
-        .catch(e => console.error('Refresh status error:', e));
-}}
-
-function refreshLogs() {{
-    fetch('/api/logs')
-        .then(r => r.json())
-        .then(d => {{
-            document.getElementById('logsContent').textContent = d.logs;
-        }})
-        .catch(e => console.error('Refresh logs error:', e));
-}}
-
-function refreshProxies() {{
-    fetch('/api/proxies')
-        .then(r => r.json())
-        .then(d => {{
-            const list = document.getElementById('proxyList');
-            if(d.proxies.length === 0) {{
-                list.innerHTML = '<div class="empty-state"><div class="empty-icon">📭</div><div class="empty-text">暂无转发配置</div></div>';
-            }} else {{
-                list.innerHTML = d.proxies.map(function(p, i) {{
-                    return '<div class="proxy-item" id="proxy-' + i + '">' +
-                        '<div class="proxy-icon">📡</div>' +
-                        '<div class="proxy-info">' +
-                        '<span class="proxy-name">' + p.name + '</span>' +
-                        '<span class="proxy-detail">' + p.localIP + ':' + p.localPort + '<span class="arrow">→</span>' + p.remotePort + '</span>' +
-                        '</div>' +
-                        '<div class="proxy-type">' + p.type.toUpperCase() + '</div>' +
-                        '<div class="proxy-actions">' +
-                        '<button class="btn-icon" onclick="editProxy(' + i + ')">✏️</button>' +
-                        '<button class="btn-icon btn-delete" onclick="deleteProxy(' + i + ')">🗑️</button>' +
-                        '</div></div>';
-                }}).join('');
-            }}
-        }})
-        .catch(e => console.error('Refresh proxies error:', e));
-}}
-
-function editProxy(idx) {{
-    const p = proxies[idx];
-    document.getElementById('proxyIndex').value = idx;
-    document.getElementById('pName').value = p.name;
-    document.getElementById('pType').value = p.type;
-    document.getElementById('pLocalIP').value = p.localIP;
-    document.getElementById('pLocalPort').value = p.localPort;
-    document.getElementById('pRemotePort').value = p.remotePort || '';
-    document.getElementById('pCustomDomain').value = p.customDomain || '';
-    document.getElementById('pHttpUser').value = p.httpUser || '';
-    document.getElementById('pHttpPassword').value = p.httpPassword || '';
-    toggleAuthFields();
-    document.getElementById('modalTitle').textContent = '编辑代理';
-    document.getElementById('proxyModal').classList.add('active');
-}}
-
-function addProxy() {{
-    document.getElementById('proxyIndex').value = -1;
-    document.getElementById('pName').value = '';
-    document.getElementById('pType').value = 'tcp';
-    document.getElementById('pLocalIP').value = '10.0.0.2';
-    document.getElementById('pLocalPort').value = '';
-    document.getElementById('pRemotePort').value = '';
-    document.getElementById('pCustomDomain').value = '';
-    document.getElementById('pHttpUser').value = '';
-    document.getElementById('pHttpPassword').value = '';
-    toggleAuthFields();
-    document.getElementById('modalTitle').textContent = '添加代理';
-    document.getElementById('proxyModal').classList.add('active');
-}}
-
-function toggleAuthFields() {{
-    const type = document.getElementById('pType').value;
-    const authDiv = document.getElementById('authFields');
-    if(type === 'http' || type === 'https') {{
-        authDiv.style.display = 'block';
-    }} else {{
-        authDiv.style.display = 'none';
-    }}
-}}
-
-function deleteProxy(idx) {{
-    if(confirm('确定要删除这个代理配置吗？')) {{
-        fetch('/api/proxy/delete', {{
-            method: 'POST',
-            headers: {{'Content-Type': 'application/json'}},
-            body: JSON.stringify({{index: idx}})
-        }}).then(r => r.json()).then(d => {{
-            if(d.success) {{ showToast('已删除'); setTimeout(() => location.reload(), 1000); }}
-            else {{ showToast(d.error, 'error'); }}
-        }});
-    }}
-}}
-
-function saveProxy(e) {{
-    e.preventDefault();
-    const data = {{
-        index: parseInt(document.getElementById('proxyIndex').value),
-        name: document.getElementById('pName').value,
-        type: document.getElementById('pType').value,
-        localIP: document.getElementById('pLocalIP').value,
-        localPort: parseInt(document.getElementById('pLocalPort').value),
-        remotePort: parseInt(document.getElementById('pRemotePort').value),
-        customDomain: document.getElementById('pCustomDomain').value,
-        httpUser: document.getElementById('pHttpUser').value,
-        httpPassword: document.getElementById('pHttpPassword').value
-    }};
-    fetch('/api/proxy/save', {{
-        method: 'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body: JSON.stringify(data)
-    }}).then(r => r.json()).then(d => {{
-        if(d.success) {{ 
-            showToast('保存成功！'); 
-            closeModal();
-            setTimeout(() => location.reload(), 1000); 
-        }}
-        else {{ showToast(d.error, 'error'); }}
-    }});
-}}
-
-function closeModal() {{ document.getElementById('proxyModal').classList.remove('active'); }}
-
-function showToast(msg, type) {{
-    const t = document.getElementById('toast');
-    t.textContent = msg;
-    t.className = 'toast show' + (type ? ' ' + type : '');
-    setTimeout(() => {{ t.classList.remove('show'); }}, 2500);
-}}
-
-document.getElementById('proxyModal').addEventListener('click', function(e) {{
-    if(e.target === this) closeModal();
-}});
-</script>
-</body></html>"""
-    return html
 
 @app.route("/api/status")
 def api_status():
@@ -595,6 +145,43 @@ def api_logs():
 def api_proxies():
     proxies = read_proxies()
     return jsonify({"proxies": proxies})
+
+@app.route("/api/tunnels")
+def api_tunnels():
+    import urllib.request
+    import base64
+    import json
+    
+    url = "http://127.0.0.1:7400/api/status"
+    req = urllib.request.Request(url)
+    auth_str = "admin:admin"
+    auth_bytes = base64.b64encode(auth_str.encode("utf-8")).decode("utf-8")
+    req.add_header("Authorization", f"Basic {auth_bytes}")
+    
+    try:
+        with urllib.request.urlopen(req, timeout=1.0) as response:
+            if response.status == 200:
+                data = json.loads(response.read().decode("utf-8"))
+                tunnels = {}
+                total_active_conns = 0
+                for category in ["tcp", "udp", "http", "https"]:
+                    if category in data:
+                        for item in data[category]:
+                            tunnels[item["name"]] = {
+                                "status": item.get("status", "unknown"),
+                                "err": item.get("err", ""),
+                                "active_conns": item.get("active_conns", 0)
+                            }
+                            total_active_conns += item.get("active_conns", 0)
+                return jsonify({
+                    "success": True, 
+                    "tunnels": tunnels, 
+                    "total_active_conns": total_active_conns,
+                    "raw_data": data
+                })
+    except Exception as e:
+        pass
+    return jsonify({"success": False, "error": "FRP 客户端未启动或管理控制台无法连接"})
 
 def read_config():
     try:
@@ -636,16 +223,21 @@ def read_proxies():
         print(f"Error: {e}")
     return proxies
 
-def write_proxies(proxies):
-    with open(CFG) as f: c = f.read()
-    sa = re.search(r'serverAddr = "([^"]+)"', c).group(1) or "your-server-ip"
-    sp = re.search(r"serverPort = (\d+)", c).group(1) or "5443"
+def generate_config_content(proxies):
+    c = ""
+    if os.path.exists(CFG):
+        try:
+            with open(CFG) as f: c = f.read()
+        except:
+            pass
+    sa_match = re.search(r'serverAddr = "([^"]+)"', c)
+    sa = sa_match.group(1) if sa_match else "your-server-ip"
+    sp_match = re.search(r"serverPort = (\d+)", c)
+    sp = sp_match.group(1) if sp_match else "5443"
     tk = re.search(r'auth\.token = "([^"]+)"', c) or re.search(r'\[auth\][^\[]*token = "([^"]+)"', c, re.DOTALL)
     token = tk.group(1) if tk else ""
-    # 新版 frpc 0.67.0+ 使用嵌套 TOML 格式
-    cfg = f'serverAddr = "{sa}"\nserverPort = {sp}\n\n[auth]\ntoken = "{token}"\n\n[transport]\ntcpMux = true\n\n[log]\nlevel = "info"\nmaxDays = 3\n'
+    cfg = f'serverAddr = "{sa}"\nserverPort = {sp}\n\n[auth]\ntoken = "{token}"\n\n[transport]\ntcpMux = true\n\n[log]\nlevel = "info"\nmaxDays = 3\n\n[webServer]\naddr = "127.0.0.1"\nport = 7400\nuser = "admin"\npassword = "admin"\n'
     for p in proxies:
-        # HTTP/HTTPS 类型使用 customDomains 而不是 remotePort
         if p["type"] in ["http", "https"]:
             cfg += f'\n[[proxies]]\nname = "{p["name"]}"\ntype = "{p["type"]}"\nlocalIP = "{p["localIP"]}"\nlocalPort = {p["localPort"]}\n'
             if p.get("httpUser") and p.get("httpPassword"):
@@ -653,7 +245,85 @@ def write_proxies(proxies):
             cfg += f'customDomains = ["{p.get("customDomain", p["name"] + ".example.com")}"]\n'
         else:
             cfg += f'\n[[proxies]]\nname = "{p["name"]}"\ntype = "{p["type"]}"\nlocalIP = "{p["localIP"]}"\nlocalPort = {p["localPort"]}\nremotePort = {p["remotePort"]}\n'
-    with open(CFG, "w") as f: f.write(cfg)
+    return cfg
+
+def find_frpc_path():
+    paths = ["/usr/local/frp/frpc", "/usr/local/bin/frpc", "/usr/bin/frpc"]
+    for p in paths:
+        if os.path.exists(p) and os.access(p, os.X_OK):
+            return p
+    try:
+        r = subprocess.run(["which", "frpc"], capture_output=True, text=True)
+        if r.returncode == 0:
+            return r.stdout.strip()
+    except:
+        pass
+    return None
+
+def apply_config_and_restart(new_config_str):
+    # 1. 静态语法 Dry Run 校验
+    frpc_path = find_frpc_path()
+    if frpc_path:
+        temp_cfg = "/tmp/frpc_verify.toml"
+        try:
+            with open(temp_cfg, "w") as f:
+                f.write(new_config_str)
+            r = subprocess.run([frpc_path, "verify", "-c", temp_cfg], capture_output=True, text=True)
+            if r.returncode != 0 and "unknown command" not in r.stderr:
+                err = r.stderr.strip() or r.stdout.strip() or "静态配置语法格式错误"
+                return False, f"⚠️ 配置格式校验失败，已阻断应用：{err}"
+        except Exception as e:
+            pass
+        finally:
+            if os.path.exists(temp_cfg):
+                try: os.remove(temp_cfg)
+                except: pass
+
+    # 2. 备份当前配置
+    old_config_str = ""
+    if os.path.exists(CFG):
+        try:
+            with open(CFG) as f: old_config_str = f.read()
+        except:
+            pass
+
+    # 3. 写入新配置
+    try:
+        os.makedirs(os.path.dirname(CFG), exist_ok=True)
+        with open(CFG, "w") as f:
+            f.write(new_config_str)
+    except Exception as e:
+        return False, f"无法写入配置文件：{e}"
+
+    # 4. 重启服务
+    try:
+        subprocess.run(["sudo", "systemctl", "restart", "frpc"], check=True, capture_output=True)
+    except Exception as e:
+        return False, f"无法重启 frpc 服务：{e}"
+
+    # 5. 动态跟踪检测 3 秒
+    import time
+    for _ in range(6):
+        time.sleep(0.5)
+        r = subprocess.run(["sudo", "systemctl", "is-active", "frpc"], capture_output=True, text=True)
+        if r.stdout.strip() != "active":
+            # 获取崩溃日志
+            logs_r = subprocess.run(["journalctl", "-u", "frpc", "-n", "10", "--no-pager"], capture_output=True, text=True)
+            crash_logs = logs_r.stdout.strip() or "服务启动后在 3 秒内发生意外退出了"
+            # 自动回滚
+            if old_config_str:
+                try:
+                    with open(CFG, "w") as f: f.write(old_config_str)
+                    subprocess.run(["sudo", "systemctl", "restart", "frpc"])
+                except Exception as rollback_err:
+                    crash_logs += f"\n(且配置自动还原失败：{rollback_err})"
+            return False, f"🚨 服务启动失败，已自动回滚配置！崩溃原因：\n{crash_logs}"
+
+    return True, None
+
+def write_proxies(proxies):
+    content = generate_config_content(proxies)
+    with open(CFG, "w") as f: f.write(content)
 
 @app.route("/api/proxy/save", methods=["POST"])
 def api_save_proxy():
@@ -672,8 +342,11 @@ def api_save_proxy():
         }
         if idx >= 0 and idx < len(proxies): proxies[idx] = new_proxy
         else: proxies.append(new_proxy)
-        write_proxies(proxies)
-        subprocess.Popen(["sudo", "systemctl", "restart", "frpc"])
+        
+        new_cfg_content = generate_config_content(proxies)
+        success, err_msg = apply_config_and_restart(new_cfg_content)
+        if not success:
+            return jsonify({"success": False, "error": err_msg}), 400
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
@@ -686,8 +359,10 @@ def api_delete_proxy():
         idx = data.get('index', -1)
         if idx >= 0 and idx < len(proxies):
             proxies.pop(idx)
-            write_proxies(proxies)
-            subprocess.Popen(["sudo", "systemctl", "restart", "frpc"])
+            new_cfg_content = generate_config_content(proxies)
+            success, err_msg = apply_config_and_restart(new_cfg_content)
+            if not success:
+                return jsonify({"success": False, "error": err_msg}), 400
             return jsonify({"success": True})
         return jsonify({"success": False, "error": "Invalid index"}), 400
     except Exception as e:
@@ -695,16 +370,144 @@ def api_delete_proxy():
 
 @app.route("/save", methods=["POST"])
 def save():
-    d = {"sa": request.form.get("sa"), "sp": request.form.get("sp"), "tk": request.form.get("tk"), "li": request.form.get("li"), "lp": request.form.get("lp"), "rp": request.form.get("rp")}
+    sa = request.form.get("sa")
+    sp = request.form.get("sp")
+    tk = request.form.get("tk")
     proxies = read_proxies()
-    write_proxies(proxies)
-    subprocess.Popen(["sudo", "systemctl", "restart", "frpc"])
+    cfg_content = f'serverAddr = "{sa}"\nserverPort = {sp}\n\n[auth]\ntoken = "{tk}"\n\n[transport]\ntcpMux = true\n\n[log]\nlevel = "info"\nmaxDays = 3\n\n[webServer]\naddr = "127.0.0.1"\nport = 7400\nuser = "admin"\npassword = "admin"\n'
+    for p in proxies:
+        if p["type"] in ["http", "https"]:
+            cfg_content += f'\n[[proxies]]\nname = "{p["name"]}"\ntype = "{p["type"]}"\nlocalIP = "{p["localIP"]}"\nlocalPort = {p["localPort"]}\n'
+            if p.get("httpUser") and p.get("httpPassword"):
+                cfg_content += f'httpUser = "{p["httpUser"]}"\nhttpPassword = "{p["httpPassword"]}"\n'
+            cfg_content += f'customDomains = ["{p.get("customDomain", p["name"] + ".example.com")}"]\n'
+        else:
+            cfg_content += f'\n[[proxies]]\nname = "{p["name"]}"\ntype = "{p["type"]}"\nlocalIP = "{p["localIP"]}"\nlocalPort = {p["localPort"]}\nremotePort = {p["remotePort"]}\n'
+            
+    success, err_msg = apply_config_and_restart(cfg_content)
+    if not success:
+        err_html = """<!DOCTYPE html><html><head><meta charset="UTF-8"><title>FRP Manager - Error</title>
+<style>
+body { font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif; background:#F2F2F7; padding:40px 20px; text-align:center; }
+.card { background:#fff; max-width:500px; margin:0 auto; padding:30px; border-radius:14px; box-shadow:0 8px 30px rgba(0,0,0,0.08); text-align:left; }
+h2 { color:#FF3B30; margin-bottom:12px; }
+pre { background:#F2F2F7; padding:12px; border-radius:8px; font-family:monospace; font-size:12px; white-space:pre-wrap; }
+.btn { display:inline-block; margin-top:20px; background:#007AFF; color:#fff; text-decoration:none; padding:10px 20px; border-radius:8px; font-weight:600; }
+</style></head>
+<body><div class="card">
+<h2>🚨 配置更新失败，已自动恢复！</h2>
+<p>应用主配置时，服务未能正常拉起。为了保障控制面板与代理服务的可用性，系统已自动回滚了配置文件。</p>
+<hr style="margin:20px 0; border:0; border-top:1px solid rgba(60,60,67,0.12)">
+<p><strong>详细排错日志：</strong></p>
+<pre>ERROR_MSG_PLACEHOLDER</pre>
+<a href="/" class="btn">返回主页面</a>
+</div></body></html>"""
+        return err_html.replace("ERROR_MSG_PLACEHOLDER", str(err_msg))
     return redirect("/")
 
 @app.route("/ctrl", methods=["POST"])
 def ctrl():
     subprocess.run(["sudo", "systemctl", request.form.get("a"), "frpc"])
     return redirect("/")
+def is_safe_filename(filename):
+    if not re.match(r'^[a-zA-Z0-9_\-\.]+\.toml$', filename):
+        return False
+    if ".." in filename or "/" in filename or "\\" in filename:
+        return False
+    return True
+
+@app.route("/api/configs")
+def api_configs():
+    configs = []
+    cfg_dir = os.path.dirname(CFG)
+    if not os.path.exists(cfg_dir):
+        os.makedirs(cfg_dir, exist_ok=True)
+        
+    files = [f for f in os.listdir(cfg_dir) if f.endswith(".toml") and f != "frpc.toml"]
+    # 额外过滤不安全的文件名，防止垃圾或恶意注入显现
+    files = [f for f in files if is_safe_filename(f)]
+    if not files:
+        default_path = os.path.join(cfg_dir, "default.toml")
+        if not os.path.exists(default_path):
+            default_content = 'serverAddr = "your-server-ip"\nserverPort = 5443\n\n[auth]\ntoken = ""\n\n[transport]\ntcpMux = true\n\n[log]\nlevel = "info"\nmaxDays = 3\n'
+            try:
+                with open(default_path, "w") as f: f.write(default_content)
+                files.append("default.toml")
+            except: pass
+        else:
+            files.append("default.toml")
+        
+    if not os.path.exists(CFG) and not os.path.islink(CFG):
+        try:
+            os.symlink(os.path.join(cfg_dir, files[0]), CFG)
+        except: pass
+        
+    active_file = "frpc.toml"
+    if os.path.islink(CFG):
+        try:
+            active_file = os.path.basename(os.readlink(CFG))
+        except: pass
+        
+    return jsonify({"configs": sorted(files), "active": active_file})
+
+@app.route("/api/config/switch", methods=["POST"])
+def api_config_switch():
+    try:
+        data = request.json
+        target_file = data.get("file", "").strip()
+        if not is_safe_filename(target_file):
+            return jsonify({"success": False, "error": "非法的配置文件名称"}), 400
+            
+        cfg_dir = os.path.dirname(CFG)
+        target_path = os.path.join(cfg_dir, target_file)
+        
+        if not target_file or not os.path.exists(target_path) or target_file == "frpc.toml":
+            return jsonify({"success": False, "error": "目标配置文件无效"}), 400
+            
+        if os.path.exists(CFG) or os.path.islink(CFG):
+            try: os.remove(CFG)
+            except Exception as e: return jsonify({"success": False, "error": f"无法清理旧软链接: {e}"}), 500
+            
+        try:
+            os.symlink(target_path, CFG)
+        except Exception as e:
+            return jsonify({"success": False, "error": f"创建软链接失败: {e}"}), 500
+            
+        with open(CFG) as f: content = f.read()
+        success, err_msg = apply_config_and_restart(content)
+        if not success:
+            return jsonify({"success": False, "error": err_msg}), 400
+            
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/api/config/create", methods=["POST"])
+def api_config_create():
+    try:
+        data = request.json
+        name = data.get("name", "").strip()
+        if not name:
+            return jsonify({"success": False, "error": "配置文件名称不能为空"}), 400
+        if not name.endswith(".toml"):
+            name += ".toml"
+        if name == "frpc.toml":
+            return jsonify({"success": False, "error": "不能创建与系统软链接同名的配置文件"}), 400
+        if not is_safe_filename(name):
+            return jsonify({"success": False, "error": "非法的配置文件名称"}), 400
+            
+        cfg_dir = os.path.dirname(CFG)
+        new_path = os.path.join(cfg_dir, name)
+        if os.path.exists(new_path):
+            return jsonify({"success": False, "error": "同名配置文件已存在"}), 400
+            
+        default_content = 'serverAddr = "your-server-ip"\nserverPort = 5443\n\n[auth]\ntoken = ""\n\n[transport]\ntcpMux = true\n\n[log]\nlevel = "info"\nmaxDays = 3\n'
+        with open(new_path, "w") as f:
+            f.write(default_content)
+            
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8081, debug=False)

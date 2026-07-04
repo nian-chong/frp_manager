@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+    <title>FRP Manager</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<div class="header">
+    <h1>FRP Manager</h1>
+    <div style="display:flex;gap:10px;align-items:center">
+        <button class="add-btn" onclick="openAuthModal()" style="background:var(--apple-gray)">🔑 安全</button>
+        <a href="/logout" class="add-btn" style="background:var(--apple-red);text-decoration:none">🚪 登出</a>
+        <button class="refresh-btn" id="refreshBtn" onclick="refreshAll()" title="刷新">🔄</button>
+    </div>
+</div>
+<div class="container">
+
+    <div class="card" id="statusCard">
+        <div class="card-header"><span class="card-title">服务状态</span></div>
+        <div class="status-section">
+            <div class="status-badge {{ sc }}" id="statusBadge"><span>{{ icon }}</span><span id="statusText">{{ st }}</span></div>
+            <div class="btn-group" id="btnGroup">
+                <form method="post" action="/ctrl" style="display:inline">{{ btn | safe }}</form>
+            </div>
+        </div>
+    </div>
+
+    <div class="card" id="configCard">
+        <div class="card-header">
+            <span class="card-title">配置文件切换</span>
+            <button class="add-btn" onclick="addConfig()" style="background:var(--apple-gray)">➕ 新建</button>
+        </div>
+        <div class="proxy-list" id="configList">
+            <!-- 动态加载配置文件列表 -->
+        </div>
+    </div>
+
+    <div class="card" id="proxyCard">
+        <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+            <div style="display:flex;align-items:center;gap:10px">
+                <span class="card-title">转发配置</span>
+                <span id="proxyMiniBadge" style="font-size:11px;font-weight:600;color:var(--apple-text-secondary);background:rgba(0,0,0,0.05);padding:2px 8px;border-radius:10px;display:none"></span>
+            </div>
+            <button class="add-btn" onclick="addProxy()">➕ 添加</button>
+        </div>
+        <div class="proxy-list" id="proxyList">{{ proxy_rows | safe }}</div>
+    </div>
+
+    <div class="card">
+        <div class="card-header"><span class="card-title">主配置</span></div>
+        <div class="form-section">
+            <form method="post" action="/save">
+                <div class="form-grid">
+                    <div class="form-group"><label>服务器地址</label><input name="sa" value="{{ cfg['sa'] }}"></div>
+                    <div class="form-group"><label>服务器端口</label><input name="sp" type="number" value="{{ cfg['sp'] }}"></div>
+                    <div class="form-group"><label>Token</label><input name="tk" value="{{ cfg['tk'] }}"></div>
+                    <div class="form-group"><label>本地 IP</label><input name="li" value="{{ cfg['li'] }}"></div>
+                    <div class="form-group"><label>本地端口</label><input name="lp" type="number" value="{{ cfg['lp'] }}"></div>
+                    <div class="form-group"><label>远程端口</label><input name="rp" type="number" value="{{ cfg['rp'] }}"></div>
+                </div>
+                <div style="margin-top:18px"><button type="submit" class="btn btn-primary btn-sm" style="width:100%">保存配置</button></div>
+            </form>
+        </div>
+    </div>
+
+    <div class="card" id="logsCard">
+        <div class="card-header"><span class="card-title">运行日志</span></div>
+        <div class="logs"><pre id="logsContent">{{ logs }}</pre></div>
+    </div>
+
+</div>
+
+<!-- Auth Modal -->
+<div class="modal" id="authModal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>安全设置 (修改凭证)</h3>
+            <button class="close-btn" onclick="closeAuthModal()">×</button>
+        </div>
+        <div class="modal-body">
+            <form id="authForm" onsubmit="saveAuth(event)">
+                <div class="form-grid">
+                    <div class="form-group"><label>新用户名</label><input type="text" id="aUser" required autocomplete="username"></div>
+                    <div class="form-group"><label>新密码</label><input type="password" id="aPass" required autocomplete="new-password"></div>
+                    <div class="form-group" style="flex-direction:row;justify-content:space-between;align-items:center;margin-top:10px">
+                        <label style="font-size:15px;color:var(--apple-text);font-weight:600">启用密码认证</label>
+                        <input type="checkbox" id="aEnabled" onchange="toggleAuthInputs()" style="width:20px;height:20px;cursor:pointer">
+                    </div>
+                </div>
+                <div style="margin-top:20px;display:flex;gap:10px">
+                    <button type="submit" class="btn btn-primary" style="flex:1">保存</button>
+                    <button type="button" class="btn btn-secondary" style="flex:1" onclick="closeAuthModal()">取消</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Config Modal -->
+<div class="modal" id="configModal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>新建配置文件</h3>
+            <button class="close-btn" onclick="closeConfigModal()">×</button>
+        </div>
+        <div class="modal-body">
+            <form id="configForm" onsubmit="saveConfig(event)">
+                <div class="form-grid">
+                    <div class="form-group"><label>文件名称</label><input type="text" id="cName" required placeholder="如：test.toml" autocomplete="off"></div>
+                </div>
+                <div style="margin-top:20px;display:flex;gap:10px">
+                    <button type="submit" class="btn btn-primary" style="flex:1">创建</button>
+                    <button type="button" class="btn btn-secondary" style="flex:1" onclick="closeConfigModal()">取消</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Proxy Modal -->
+<div class="modal" id="proxyModal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 id="modalTitle">编辑代理</h3>
+            <button class="close-btn" onclick="closeModal()">×</button>
+        </div>
+        <div class="modal-body">
+            <form id="proxyForm" onsubmit="saveProxy(event)">
+                <input type="hidden" id="proxyIndex" value="-1">
+                <div class="form-grid">
+                    <div class="form-group"><label>名称</label><input type="text" id="pName" required placeholder="如：web-http"></div>
+                    <div class="form-group"><label>类型</label><select id="pType" onchange="toggleAuthFields()"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="http">HTTP</option><option value="https">HTTPS</option></select></div>
+                    <div class="form-group"><label>本地 IP</label><input type="text" id="pLocalIP" value="127.0.0.1" required></div>
+                    <div class="form-group"><label>本地端口</label><input type="number" id="pLocalPort" required placeholder="如：80"></div>
+                    <div class="form-group"><label>远程端口</label><input type="number" id="pRemotePort" required placeholder="如：8080"></div>
+                    <div id="authFields" style="display:none;border-top:1px solid var(--apple-separator);padding-top:16px;margin-top:8px">
+                        <div style="grid-column:1/-1;display:flex;align-items:center;gap:8px;margin-bottom:12px">
+                            <span style="font-size:13px;font-weight:600;color:var(--apple-text-secondary)">🔐 HTTP/HTTPS 配置</span>
+                        </div>
+                        <div class="form-group"><label>绑定域名</label><input type="text" id="pCustomDomain" placeholder="如：web.example.com（留空自动生成）"></div>
+                        <div class="form-group"><label>用户名</label><input type="text" id="pHttpUser" placeholder="留空则禁用认证"></div>
+                        <div class="form-group"><label>密码</label><input type="text" id="pHttpPassword" placeholder="留空则禁用认证"></div>
+                    </div>
+                </div>
+                <div style="margin-top:20px;display:flex;gap:10px">
+                    <button type="submit" class="btn btn-primary" style="flex:1">保存</button>
+                    <button type="button" class="btn btn-secondary" style="flex:1" onclick="closeModal()">取消</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- 全局变量注入 -->
+<script>
+    const proxies = {{ proxies_json | safe }};
+    const authConfig = {{ auth_config_json | safe }};
+</script>
+<script src="/static/js/main.js"></script>
+</body>
+</html>
